@@ -1,12 +1,38 @@
 """Vercel ASGI entrypoint for a self-hosted image search MCP server."""
 
 import os
+import hmac
 
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from image_search_mcp import ImageSearchServer
+class BearerAuthMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path") != "/mcp":
+            await self.app(scope, receive, send)
+            return
+
+        expected = os.getenv("MCP_BEARER_TOKEN")
+        headers = dict(scope.get("headers", []))
+        supplied = headers.get(b"authorization", b"").decode("latin-1")
+
+        if not expected or not hmac.compare_digest(
+            supplied, f"Bearer {expected}"
+        ):
+            response = JSONResponse(
+                {"error": "Unauthorized"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
 
 
 def _env_list(name, defaults):
@@ -60,7 +86,7 @@ async def health(_request):
         "name": "image-search-mcp",
         "transport": "streamable-http",
         "mcp_endpoint": "/mcp",
-        "auth": "none",
+        "auth": "bearer",
     })
 
 
@@ -71,3 +97,5 @@ async def reject_mcp_get(_request):
 
 app.routes.insert(0, Route("/mcp", reject_mcp_get, methods=["GET"]))
 app.routes.insert(0, Route("/", health, methods=["GET"]))
+
+app = BearerAuthMiddleware(app)
